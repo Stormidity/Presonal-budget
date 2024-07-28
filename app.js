@@ -14,13 +14,13 @@ const pool = new Pool({
   user: 'me',
   host: 'localhost',
   database: 'api',
-  password: 'postgres',
+  password: 'password',
   port: 5432,
 });
 
 // To create each envelope individually.
 
-app.post('/', async (req, res, next) => {
+app.post('/envelopes', async (req, res, next) => {
   const { name, budget } = req.body;
   if (!name || budget === undefined) {
     return res.status(400).send({ error: 'Please enter a name and a budget' });
@@ -37,7 +37,7 @@ app.post('/', async (req, res, next) => {
 });
 
 // To get all Envelopes
-app.get('/', async (req, res, next) => {
+app.get('/envelopes', async (req, res, next) => {
   try {
     const result = await pool.query('SELECT * FROM envelopes');
     res.status(200).send(result.rows);
@@ -48,7 +48,7 @@ app.get('/', async (req, res, next) => {
 
 
 // To get a specific envelope by ID
-app.get('/:id', async (req, res) => {
+app.get('/envelopes/:id', async (req, res) => {
   const id = parseInt(req.params.id);
 
   try {
@@ -63,7 +63,7 @@ app.get('/:id', async (req, res) => {
 });
 
 // To update a specific envelope
-app.put('/:id', async (req, res) => {
+app.put('/envelopes/:id', async (req, res) => {
   const id = parseInt(req.params.id);
   const { name, budget } = req.body;
   try {
@@ -81,7 +81,7 @@ app.put('/:id', async (req, res) => {
 
 
 // To delete a specific envelope
-app.delete('/:id', async (req, res) => {
+app.delete('/envelopes/:id', async (req, res) => {
   const id = parseInt(req.params.id);
 
   try {
@@ -98,7 +98,7 @@ app.delete('/:id', async (req, res) => {
 })
 
 // To transfer a value from one envelope to another
-app.post('/transfer/:sourceId/:targetId', async (req, res) => {
+app.post('/envelopes/transfer/:sourceId/:targetId', async (req, res) => {
   const sourceId = parseInt(req.params.sourceId);
   const targetId = parseInt(req.params.targetId);
   const amount = parseFloat(req.body.amount);
@@ -138,6 +138,82 @@ app.post('/transfer/:sourceId/:targetId', async (req, res) => {
     client.release();
   }
 });
+
+// Create a new transaction
+
+app.post ('/transactions', async (req, res) => {
+  const { amount, recipient, envelope_id } = req.body;
+  if (!amount || !recipient || !envelope_id) {
+    return res.status(400).send({ error: 'Please provide amount, recipient, and envelope_id.'});
+  }
+
+  try {
+    const result = await pool.query(
+        'INSERT INTO transactions (amount, recipient, envelope_id) VALUES ($1, $2, $3) RETURNING *', [amount, recipient, envelope_id]
+    );
+    await pool.query('UPDATE envelopes SET budget = budget - $1 WHERE id = $2', [amount, envelope_id]);
+    res.status(201).send(result.rows[0])
+  } catch (error) {
+    res.status(500).send(error);
+  }
+});
+
+// Get all transactions
+app.get('/transactions', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM transactions ORDER BY date DESC');
+    res.status(200).send(result.rows);
+  } catch (error) {
+    res.status(500).send(error);
+  }
+})
+
+// Get a specific transaction by ID
+app.get('/transactions/:id', async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const result = await pool.query('SELECT * FROM transactions WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No transactions found.'});
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send(error);
+  }
+});
+
+// Update a specific transaction by ID
+app.put('/transactions/:id', async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { amount, recipient, envelope_id } = req.body;
+
+  try {
+    const result = await pool.query(
+        'UPDATE transactions SET amount = $1, recipient = $2, envelope_id = $3 WHERE id = $4 RETURNING *', [amount, recipient, envelope_id, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No transactions found.'});
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send(error);
+  }
+});
+
+// Delete a specific transaction
+app.delete('transactions/:id', async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const result = await pool.query('DELETE FROM transactions WHERE id = $1 RETURNING *', [id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'No transactions found!' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send(error);
+  }
+})
 
 // Listening port
 app.listen(PORT, () => {

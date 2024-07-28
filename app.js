@@ -2,121 +2,142 @@ const express = require('express');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 const logger = require('morgan');
+const bodyParser = require('body-parser');
+const { Pool } = require('pg');
 const PORT = process.env.PORT || 8080;
 
 
-const envelopesMain = require('./envelopes');
-
-
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
+
+const pool = new Pool({
+  user: 'me',
+  host: 'localhost',
+  database: 'api',
+  password: 'postgres',
+  port: 5432,
+});
 
 // To create each envelope individually.
 
-app.post('/', (req, res, next) => {
-  const envelopes = envelopesMain;
-  let lastId = envelopes.length - 1;
+app.post('/', async (req, res, next) => {
   const { name, budget } = req.body;
-  if (!name || !budget) {
+  if (!name || budget === undefined) {
     return res.status(400).send({ error: 'Please enter a name and a budget' });
   }
-  const newEnvelope = {
-    id: ++lastId, // Generates a random ID
-    name,
-    budget,
-  };
-  envelopes.push(newEnvelope);
-  res.status(201).send(newEnvelope);
+  try {
+    const result = await pool.query(
+        'INSERT INTO envelopes (name, budget) VALUES ($1, $2) RETURNING *', [name, budget]
+    );
+    res.status(201).send(result.rows[0]);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
+  }
+
 });
 
 // To get all Envelopes
-app.get('/', (req, res, next) => {
+app.get('/', async (req, res, next) => {
   try {
-    const envelopes = envelopesMain;
-    res.status(200).send(envelopes);
-  } catch (err) {
-    res.status(400).send(err)
+    const result = await pool.query('SELECT * FROM envelopes');
+    res.status(200).send(result.rows);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
 });
 
 
 // To get a specific envelope by ID
-app.get('/:id', (req, res) => {
-  const envelopes = envelopesMain;
+app.get('/:id', async (req, res) => {
   const id = parseInt(req.params.id);
-  const envelope = envelopes.find((envelope) => envelope.id === id);
-  if (!envelope) {
-    return res.status(404).json({ error: 'No envelope found!' });
+
+  try {
+    const result = await pool.query('SELECT * FROM envelopes WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No envelopes found.' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
-    res.json(envelope);
 });
 
 // To update a specific envelope
-app.put('/:id', (req, res) => {
-  const envelopes = envelopesMain;
+app.put('/:id', async (req, res) => {
   const id = parseInt(req.params.id);
-  const envelopeIndex = envelopes.findIndex((envelope) => envelope.id === id);
-
-  if (envelopeIndex === -1) {
-    return res.status(404).json({ error: 'No envelope found!' });
+  const { name, budget } = req.body;
+  try {
+    const result = await pool.query(
+        'UPDATE envelopes SET name = $1, budget = $2 WHERE id = $3 RETURNING *', [name, budget, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No envelopes found.' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
-
-  const updatedEnvelope = {...envelopes[envelopeIndex], ...req.body};
-  // To ensure budget isn't a negative number
-  if (updatedEnvelope.budget !== undefined && updatedEnvelope.budget < 0) {
-    return res.status(400).json({ error: 'Budget cannot be negative.' });
-  }
-
-  envelopes[envelopeIndex] = updatedEnvelope;
-  res.json(updatedEnvelope);
 })
 
 
 // To delete a specific envelope
-app.delete('/:id', (req, res) => {
+app.delete('/:id', async (req, res) => {
   const id = parseInt(req.params.id);
-  const envelopes = envelopesMain;
-  const envelopeIndex = envelopes.findIndex((envelope) => envelope.id === id);
 
-  if (envelopeIndex === -1) {
-    return res.status(404).json({ error: 'No envelope found!' });
+  try {
+    const result = await pool.query(
+        'DELETE FROM envelopes WHERE id = $1 RETURNING *', [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No envelopes found.' });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).send({ error: error.message });
   }
-
-  const deletedEnvelope = envelopes.splice(envelopeIndex, 1);
-  res.json(deletedEnvelope[0]);
 })
 
 // To transfer a value from one envelope to another
-app.post('/transfer/:sourceId/:targetId', (req, res) => {
+app.post('/transfer/:sourceId/:targetId', async (req, res) => {
   const sourceId = parseInt(req.params.sourceId);
   const targetId = parseInt(req.params.targetId);
   const amount = parseFloat(req.body.amount);
-  const envelopes = envelopesMain;
 
-  // To find the source
-  const sourceEnvelopeIndex = envelopes.findIndex((envelope) => envelope.id === sourceId);
-  if (sourceEnvelopeIndex === -1) {
-    return res.status(404).json({ error: 'Source envelope not found!' });
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN')
+    // To find the source
+    const sourceResult = await client.query('SELECT * FROM envelopes WHERE id = $1', [sourceId]);
+    if (sourceResult.rows.length === 0) {
+      return res.status(404).json({ error: 'No envelopes found.' });
+    }
+
+    const sourceEnvelope = sourceResult.rows[0];
+    if (sourceEnvelope.budget < amount) {
+      return res.status(404).json({ error: 'Insufficient funds.' });
+    }
+    // To find the target
+    const targetResult = await client.query('SELECT * FROM envelopes WHERE id = $1', [targetId]);
+    if (targetResult.rows.length === 0) {
+      return res.status(404).json({ error: 'No envelopes found.' });
+    }
+
+    // To update the envelopes
+    await client.query('UPDATE envelopes SET budget = budget - $1 WHERE id = $2', [amount, sourceId]);
+    await client.query('UPDATE envelopes SET budget = budget + $1 WHERE id = $2', [amount, targetId]);
+
+    await client.query('COMMIT');
+
+    res.json({ sourceEnvelope: {...sourceEnvelope, budget: sourceEnvelope.budget - amount }, targetEnvelope: {...targetResult.rows[0], budget: targetResult.rows[0].budget + amount} });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).send(error);
+  } finally {
+    client.release();
   }
-  const sourceEnvelope = envelopes[sourceEnvelopeIndex];
-
-  // To find the target
-  const targetEnvelopeIndex = envelopes.findIndex((envelope) => envelope.id === targetId);
-  if (targetEnvelopeIndex === -1) {
-    return res.status(404).json({ error: 'Target envelope not found!' });
-  }
-  const targetEnvelope = envelopes[sourceEnvelopeIndex];
-
-  // To check if there's enough budget in the source
-  if (sourceEnvelope.budget < amount) {
-    return res.status(400).json({error: 'Insufficient funds!'});
-  }
-
-  envelopes[sourceEnvelopeIndex].budget -= amount;
-  envelopes[targetEnvelopeIndex].budget += amount;
-
-  res.json({ sourceEnvelope: envelopes[sourceEnvelopeIndex], targetEnvelope: envelopes[targetEnvelopeIndex] });
-})
+});
 
 // Listening port
 app.listen(PORT, () => {
